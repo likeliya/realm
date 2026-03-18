@@ -11,7 +11,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const remotePortInput = document.getElementById('remotePort');
     const rulesInput = document.getElementById('rulesInput');
 
-    // 更新服务状态
+    let allRules = [];
+    let currentPage = 1;
+    let pageSize = 10;
+    let totalRules = 0;
+
+    const pageSizeSelect = document.getElementById('pageSizeSelect');
+
     async function updateServiceStatus() {
         try {
             const response = await fetch('/check_status');
@@ -36,81 +42,100 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-	// 获取转发规则
-	async function fetchForwardingRules() {
-	    try {
-	        const response = await fetch('/get_rules', {
-	            method: 'GET',
-	            headers: {
-	                'Cache-Control': 'no-cache',
-	                'Pragma': 'no-cache'
-	            },
-	        });
-	
-	        if (!response.ok) {
-	            throw new Error('获取规则失败：' + response.statusText);
-	        }
-	
-	        const rules = await response.json();
-	        const tbody = document.querySelector('#forwardingTable tbody');
-	        tbody.innerHTML = '';
-	
-	        // 创建当前规则的端口占用列表
-	        const usedPorts = new Set();
-	
-	        if (!Array.isArray(rules)) {
-	            throw new Error('服务器返回的数据格式不正确');
-	        }
-	
-	        rules.forEach(rule => {
-	            // 检查规则格式并统一属性名
-	            const listen = rule.Listen || rule.listen;
-	            const remote = rule.Remote || rule.remote;
-	
-	            if (!listen || !remote) {
-	                console.error('规则格式错误:', rule);
-	                return;
-	            }
-	
-	            const localPort = listen.split(':')[1];
-	            usedPorts.add(localPort);
-	
-	            const lastColonIndex = remote.lastIndexOf(':');
-	            const remoteIP = remote.substring(0, lastColonIndex);
-	            const remotePort = remote.substring(lastColonIndex + 1);
-	
-	            const row = document.createElement('tr');
-	            row.innerHTML = `
-	                <td>${tbody.children.length + 1}</td>
-	                <td>${localPort}</td>
-	                <td>${remoteIP}</td>
-	                <td>${remotePort}</td>
-	                <td><button class="delete-btn" data-listen="${listen}">删除</button></td>
-	            `;
-	            tbody.appendChild(row);
-	        });
-	
-	        // 为删除按钮添加事件监听
-	        document.querySelectorAll('.delete-btn').forEach(button => {
-	            button.addEventListener('click', function() {
-	                deleteRule(this.getAttribute('data-listen'));
-	            });
-	        });
-	
-	        return usedPorts;
-	    } catch (error) {
-	        console.error('获取规则失败:', error);
-	        outputDiv.textContent = `获取转发规则失败: ${error.message}`;
-	        // 添加更详细的错误信息输出
-	        if (error.response) {
-	            console.error('Response status:', error.response.status);
-	            console.error('Response text:', await error.response.text());
-	        }
-	        return new Set();
-	    }
-	}
+    async function fetchForwardingRules() {
+        try {
+            const response = await fetch(`/get_rules?page=${currentPage}&size=${pageSize}`, {
+                method: 'GET',
+                headers: {
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                },
+            });
+    
+            if (!response.ok) {
+                throw new Error('获取规则失败：' + response.statusText);
+            }
+    
+            const data = await response.json();
+            const rules = data.rules || [];
+            if (!Array.isArray(data.rules)) {
+                throw new Error('服务器返回的数据格式不正确');
+            }
 
-    // 删除规则
+            totalRules = data.total;
+            allRules = data.rules.map(rule => {
+                const listen = rule.Listen || rule.listen;
+                const remote = rule.Remote || rule.remote;
+                return { listen, remote };
+            });
+
+            renderForwardingRules();
+
+            return allRules;
+        } catch (error) {
+            console.error('获取规则失败:', error);
+            outputDiv.textContent = `获取转发规则失败: ${error.message}`;
+            return [];
+        }
+    }
+
+    function renderForwardingRules() {
+        const tbody = document.querySelector('#forwardingTable tbody');
+        tbody.innerHTML = '';
+
+        allRules.forEach((rule, index) => {
+            const listen = rule.listen;
+            const remote = rule.remote;
+
+            const localPort = listen.split(':')[1];
+            const lastColonIndex = remote.lastIndexOf(':');
+            const remoteIP = remote.substring(0, lastColonIndex);
+            const remotePort = remote.substring(lastColonIndex + 1);
+
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${localPort}</td>
+                <td>${remoteIP}</td>
+                <td>${remotePort}</td>
+                <td><button class="delete-btn" data-listen="${listen}">删除</button></td>
+            `;
+            tbody.appendChild(row);
+        });
+
+        document.querySelectorAll('.delete-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                deleteRule(this.getAttribute('data-listen'));
+            });
+        });
+
+        updatePaginationInfo();
+    }
+
+    function updatePaginationInfo() {
+        const pageInfo = document.getElementById('pageInfo');
+        const totalPages = Math.ceil(totalRules / pageSize);
+        pageInfo.textContent = `第 ${currentPage} / ${totalPages === 0 ? 1 : totalPages} 页`;
+
+        document.getElementById('prevPage').disabled = (currentPage <= 1);
+        document.getElementById('nextPage').disabled = (currentPage >= totalPages || totalPages === 0);
+    }
+
+    function goToPrevPage() {
+        if (currentPage > 1) {
+            currentPage--;
+            fetchForwardingRules();
+        }
+    }
+
+    function goToNextPage() {
+        const totalPages = Math.ceil(totalRules / pageSize);
+        if (currentPage < totalPages) {
+            currentPage++;
+            fetchForwardingRules();
+        }
+    }
+
     async function deleteRule(listenAddress) {
         try {
             const response = await fetch(`/delete_rule?listen=${encodeURIComponent(listenAddress)}`, {
@@ -121,7 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error('删除规则失败：' + response.statusText);
             }
 
-            // 删除成功后重启服务
             const restartResponse = await fetch('/restart_service', {
                 method: 'POST'
             });
@@ -138,7 +162,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // 添加单个规则
     async function addRule() {
         const localPort = localPortInput.value.trim();
         const remoteIP = remoteIPInput.value.trim();
@@ -150,7 +173,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            const usedPorts = await fetchForwardingRules();
+            const usedPorts = new Set(allRules.map(r => r.listen.split(':')[1]));
             if (usedPorts.has(localPort)) {
                 outputDiv.textContent = `端口 ${localPort} 已被占用`;
                 return;
@@ -171,7 +194,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error('添加规则失败：' + response.statusText);
             }
 
-            // 添加成功后重启服务
             const restartResponse = await fetch('/restart_service', {
                 method: 'POST'
             });
@@ -191,7 +213,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // 批量添加规则
     async function addBatchRules() {
         const rules = rulesInput.value.trim().split('\n').filter(Boolean);
         if (rules.length === 0) {
@@ -199,7 +220,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const usedPorts = await fetchForwardingRules();
+        const usedPorts = new Set(allRules.map(r => r.listen.split(':')[1]));
         const failedRules = [];
         let hasSuccess = false;
 
@@ -266,7 +287,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // 事件监听器
     startButton.addEventListener('click', async () => {
         try {
             const response = await fetch('/start_service', {
@@ -334,10 +354,17 @@ document.addEventListener('DOMContentLoaded', () => {
     addRuleButton.addEventListener('click', addRule);
     addBatchRulesButton.addEventListener('click', addBatchRules);
 
-    // 初始化
+    document.getElementById('prevPage').addEventListener('click', goToPrevPage);
+    document.getElementById('nextPage').addEventListener('click', goToNextPage);
+
+    pageSizeSelect.addEventListener('change', () => {
+        pageSize = parseInt(pageSizeSelect.value, 10);
+        currentPage = 1;
+        fetchForwardingRules();
+    });
+
     fetchForwardingRules();
     updateServiceStatus();
     
-    // 定期更新服务状态
     setInterval(updateServiceStatus, 15000);
 });
