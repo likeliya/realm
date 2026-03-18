@@ -32,15 +32,15 @@
 ## 一键脚本：
 kvm lxc debian/ubuntu
 ```
-curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-debian.sh -o realm.sh && chmod +x realm.sh &&  ./realm.sh
+curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-debian.sh -o realm.sh && chmod +x realm.sh && ./realm.sh
 ```
 kvm lxc alpine
 ```
-curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-alpine.sh -o realm.sh && chmod +x realm.sh &&  ./realm.sh
+curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-alpine.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
 ```
 docker alpine
 ```
-curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-docker-alpine.sh -o realm.sh && chmod +x realm.sh &&  ./realm.sh
+curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-docker-alpine.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
 ```
 ## 默认配置文件（脚本在首次部署环境时会自动添加）
 ```
