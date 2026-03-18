@@ -10,7 +10,7 @@
 
 5.原开发者参考自https://www.nodeseek.com/post-183613-1 ，在此感谢大佬的教程。
 
-6.我自己Fork的原开发者的GitHub项目地址https://github.com/wcwq98/realm，感谢大佬的开源。
+6.我自己Fork的原开发者的GitHub项目地址https://github.com/wcwq98/realm ，感谢大佬的开源。
 
 ### 使用一键脚本：
 
