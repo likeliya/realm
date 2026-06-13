@@ -14,22 +14,16 @@
 
 ### 使用一键脚本：
 
-kvm lxc debian/ubuntu
-
-```
-curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-debian.sh -o realm.sh && chmod +x realm.sh && ./realm.sh
-```
-
-kvm lxc alpine
+[kvm lxc docker podman] alpine
 
 ```
 curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-alpine.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
 ```
 
-docker alpine
+[kvm lxc docker podman] debian/ubuntu
 
 ```
-curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-docker-alpine.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
+curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-debian.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
 ```
 
 ## 
