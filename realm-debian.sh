@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # ==========================================
-# Realm 一键转发脚本 (防死循环版 v3.1.2)
+# Realm 一键转发脚本 v3.1.2
 # 更新日志:
 # 1. 新增输入错误计数器
 # 2. 连续输错 2 次自动返回主菜单
+# 3. 添加 ipv4 和 ipv6 入口选择
 # ==========================================
 
 # --- 基础配置 ---
@@ -178,16 +179,32 @@ uninstall_realm() {
     echo -e "${GREEN}已卸载${PLAIN}"
 }
 
-# --- 转发管理 (已添加重试限制) ---
+# --- 转发管理 (已添加重试限制 增加入口 IP 类型选择) ---
 
 add_forward() {
     echo -e "${YELLOW}>>> 添加转发 (连续错误2次自动返回)${PLAIN}"
     
-    # 1. 本机端口
     local attempt=0
+    # 0. 选择监听IP类型
+    local listen_ip="0.0.0.0"
+    while true; do
+        read -e -p "选择本机入口类型 (1: IPv4 [0.0.0.0], 2: IPv6/双栈 [::] 默认1): " l_type
+        if [[ -z "$l_type" || "$l_type" == "1" ]]; then
+            listen_ip="0.0.0.0"
+            break
+        elif [[ "$l_type" == "2" ]]; then
+            listen_ip="[::]"
+            break
+        else
+            ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
+            echo -e "${RED}输入错误，请输入 1 或 2。${PLAIN}"
+        fi
+    done
+
+    # 1. 本机端口
+    attempt=0
     while true; do
         read -e -p "本机端口: " lp
-        # 依次校验：格式、占用、重复
         if ! validate_port "$lp"; then
             ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
             continue
@@ -225,11 +242,17 @@ add_forward() {
         break
     done
 
+    # 自动为 IPv6 落地地址添加方括号
+    local formatted_rip="$rip"
+    if [[ "$rip" =~ ":" ]]; then
+        formatted_rip="[${rip}]"
+    fi
+
     cat <<EOF >> "$CONFIG_FILE"
 
 [[endpoints]]
-listen = "0.0.0.0:$lp"
-remote = "$rip:$rp"
+listen = "${listen_ip}:$lp"
+remote = "${formatted_rip}:$rp"
 EOF
     restart_service
 }
@@ -238,22 +261,44 @@ add_range_forward() {
     echo -e "${YELLOW}>>> 端口段转发 (连续错误2次自动返回)${PLAIN}"
     local attempt=0
     
-    while true; do read -e -p "落地IP: " rip; validate_ip "$rip" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
+    # 0. 选择监听IP类型
+    local listen_ip="0.0.0.0"
+    while true; do
+        read -e -p "选择本机入口类型 (1: IPv4 [0.0.0.0], 2: IPv6/双栈 [::] 默认1): " l_type
+        if [[ -z "$l_type" || "$l_type" == "1" ]]; then
+            listen_ip="0.0.0.0"
+            break
+        elif [[ "$l_type" == "2" ]]; then
+            listen_ip="[::]"
+            break
+        else
+            ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
+            echo -e "${RED}输入错误，请输入 1 或 2。${PLAIN}"
+        fi
+    done
+
+    attempt=0; while true; do read -e -p "落地IP: " rip; validate_ip "$rip" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
     attempt=0; while true; do read -e -p "起始端口: " sp; validate_port "$sp" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
     attempt=0; while true; do read -e -p "结束端口: " ep; validate_port "$ep" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
     attempt=0; while true; do read -e -p "落地基准端口: " rbp; validate_port "$rbp" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
 
     [ "$sp" -ge "$ep" ] && { echo -e "${RED}起始必须小于结束${PLAIN}"; return; }
 
+    # 自动为 IPv6 落地地址添加方括号
+    local formatted_rip="$rip"
+    if [[ "$rip" =~ ":" ]]; then
+        formatted_rip="[${rip}]"
+    fi
+
     echo "生成中..."
     local rp=$rbp
     for ((p=$sp; p<=$ep; p++)); do
-        if ! grep -q "listen = \"0.0.0.0:$p\"" "$CONFIG_FILE"; then
+        if ! grep -q "listen = \"\[::\]:$p\"" "$CONFIG_FILE" && ! grep -q "listen = \"0.0.0.0:$p\"" "$CONFIG_FILE"; then
             cat <<EOF >> "$CONFIG_FILE"
 
 [[endpoints]]
-listen = "0.0.0.0:$p"
-remote = "$rip:$rp"
+listen = "${listen_ip}:$p"
+remote = "${formatted_rip}:$rp"
 EOF
         fi
         ((rp++))
