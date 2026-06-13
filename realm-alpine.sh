@@ -123,7 +123,8 @@ check_port_available() {
 check_rule_exists() {
     local port=$1
     if [ -f "$CONFIG_FILE" ]; then
-        if grep -q "listen = \"0.0.0.0:${port}\"" "$CONFIG_FILE"; then
+        # 兼容旧的 0.0.0.0 格式和新的 [::] 格式检测
+        if grep -q "listen = \"0.0.0.0:${port}\"" "$CONFIG_FILE" || grep -q "listen = \"\[::\]:${port}\"" "$CONFIG_FILE"; then
             echo -e "${RED}错误: 端口 ${port} 的规则已存在。${PLAIN}"
             return 0
         fi
@@ -149,19 +150,37 @@ EOF
 }
 
 check_dependencies() {
-    local dependencies=("wget" "tar" "sed" "grep" "curl" "unzip" "ss")
+    # 把 ss 从常规依赖数组中拿出来
+    local dependencies=("wget" "tar" "sed" "grep" "curl" "unzip")
     local missing=()
     for dep in "${dependencies[@]}"; do
         if ! command -v "$dep" &> /dev/null; then missing+=("$dep"); fi
     done
-    if [ ${#missing[@]} -gt 0 ] || ! command -v ip >/dev/null 2>&1; then
-        echo -e "${YELLOW}安装依赖: ${missing[*]} ...${PLAIN}"
+    
+    # 专门单独检查 ss 和 ip 命令 (它们通常都由 iproute/iproute2 提供)
+    local need_iproute=false
+    if ! command -v ss >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
+        need_iproute=true
+    fi
+
+    if [ ${#missing[@]} -gt 0 ] || [ "$need_iproute" = true ]; then
+        # 友好的打印提示
+        local msg="${missing[*]}"
+        [ "$need_iproute" = true ] && msg="$msg iproute2"
+        echo -e "${YELLOW}安装缺失依赖: $msg ...${PLAIN}"
+        
+        # 执行对应系统的安装命令
         if [ -x "$(command -v apt-get)" ]; then
-            apt-get update -y >/dev/null 2>&1 && apt-get install -y "${missing[@]}" iproute2
+            apt-get update -y >/dev/null 2>&1
+            [ ${#missing[@]} -gt 0 ] && apt-get install -y "${missing[@]}"
+            [ "$need_iproute" = true ] && apt-get install -y iproute2
         elif [ -x "$(command -v yum)" ]; then
-            yum install -y "${missing[@]}" iproute
+            [ ${#missing[@]} -gt 0 ] && yum install -y "${missing[@]}"
+            [ "$need_iproute" = true ] && yum install -y iproute
         elif [ -x "$(command -v apk)" ]; then
-            apk update >/dev/null 2>&1 && apk add "${missing[@]}" iproute2
+            apk update >/dev/null 2>&1
+            [ ${#missing[@]} -gt 0 ] && apk add "${missing[@]}"
+            [ "$need_iproute" = true ] && apk add iproute2
         else
             echo -e "${RED}请手动安装依赖。${PLAIN}"; exit 1
         fi
@@ -174,11 +193,17 @@ install_realm() {
     local version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [ -z "$version" ] && version="v2.6.0"
     
+    # 核心修复：动态判断 libc 环境。如果是 Alpine 则使用 musl 版本。
+    local libc="gnu"
+    if [ -f "/etc/alpine-release" ]; then
+        libc="musl"
+    fi
+    
     local arch=$(uname -m)
     local filename=""
     case "$arch" in
-        x86_64) filename="realm-x86_64-unknown-linux-gnu.tar.gz" ;;
-        aarch64) filename="realm-aarch64-unknown-linux-gnu.tar.gz" ;;
+        x86_64) filename="realm-x86_64-unknown-linux-${libc}.tar.gz" ;;
+        aarch64|arm64) filename="realm-aarch64-unknown-linux-${libc}.tar.gz" ;;
         *) echo -e "${RED}不支持架构: $arch${PLAIN}"; return 1 ;;
     esac
 
@@ -206,6 +231,7 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload; systemctl enable realm; systemctl restart realm
     elif [ "$INIT_SYS" == "openrc" ]; then
+        # 修复：增加日志输出变量，进程异常退出时可查看 /var/log/realm.err 排查
         cat <<EOF > "$SERVICE_FILE_OPENRC"
 #!/sbin/openrc-run
 
@@ -215,6 +241,8 @@ command="${REALM_BIN}"
 command_args="-c ${CONFIG_FILE}"
 command_background=true
 pidfile="/var/run/realm.pid"
+output_log="/var/log/realm.log"
+error_log="/var/log/realm.err"
 directory="${REALM_DIR}"
 
 depend() {
@@ -247,16 +275,42 @@ uninstall_realm() {
     echo -e "${GREEN}已卸载${PLAIN}"
 }
 
-# --- 转发管理 (已添加重试限制) ---
+# --- 服务控制 ---
+stop_service() { 
+    if [ "$INIT_SYS" == "systemd" ]; then
+        systemctl stop realm >/dev/null 2>&1
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        rc-service realm stop >/dev/null 2>&1
+    fi
+    echo "已停止" 
+}
+
+# --- 转发管理 (已添加重试限制) (增加入口 IP 类型选择)---
 
 add_forward() {
     echo -e "${YELLOW}>>> 添加转发 (连续错误2次自动返回)${PLAIN}"
     
-    # 1. 本机端口
     local attempt=0
+    # 0. 选择监听IP类型
+    local listen_ip="0.0.0.0"
+    while true; do
+        read -e -p "选择本机入口类型 (1: IPv4 [0.0.0.0], 2: IPv6/双栈 [::] 默认1): " l_type
+        if [[ -z "$l_type" || "$l_type" == "1" ]]; then
+            listen_ip="0.0.0.0"
+            break
+        elif [[ "$l_type" == "2" ]]; then
+            listen_ip="[::]"
+            break
+        else
+            ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
+            echo -e "${RED}输入错误，请输入 1 或 2。${PLAIN}"
+        fi
+    done
+
+    # 1. 本机端口
+    attempt=0
     while true; do
         read -e -p "本机端口: " lp
-        # 依次校验：格式、占用、重复
         if ! validate_port "$lp"; then
             ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
             continue
@@ -294,11 +348,17 @@ add_forward() {
         break
     done
 
+    # 自动为 IPv6 落地地址添加方括号
+    local formatted_rip="$rip"
+    if [[ "$rip" =~ ":" ]]; then
+        formatted_rip="[${rip}]"
+    fi
+
     cat <<EOF >> "$CONFIG_FILE"
 
 [[endpoints]]
-listen = "0.0.0.0:$lp"
-remote = "$rip:$rp"
+listen = "${listen_ip}:$lp"
+remote = "${formatted_rip}:$rp"
 EOF
     restart_service
 }
@@ -307,22 +367,44 @@ add_range_forward() {
     echo -e "${YELLOW}>>> 端口段转发 (连续错误2次自动返回)${PLAIN}"
     local attempt=0
     
-    while true; do read -e -p "落地IP: " rip; validate_ip "$rip" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
+    # 0. 选择监听IP类型
+    local listen_ip="0.0.0.0"
+    while true; do
+        read -e -p "选择本机入口类型 (1: IPv4 [0.0.0.0], 2: IPv6/双栈 [::] 默认1): " l_type
+        if [[ -z "$l_type" || "$l_type" == "1" ]]; then
+            listen_ip="0.0.0.0"
+            break
+        elif [[ "$l_type" == "2" ]]; then
+            listen_ip="[::]"
+            break
+        else
+            ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
+            echo -e "${RED}输入错误，请输入 1 或 2。${PLAIN}"
+        fi
+    done
+
+    attempt=0; while true; do read -e -p "落地IP: " rip; validate_ip "$rip" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
     attempt=0; while true; do read -e -p "起始端口: " sp; validate_port "$sp" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
     attempt=0; while true; do read -e -p "结束端口: " ep; validate_port "$ep" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
     attempt=0; while true; do read -e -p "落地基准端口: " rbp; validate_port "$rbp" && break; ((attempt++)); [ $attempt -ge 2 ] && return; done
 
     [ "$sp" -ge "$ep" ] && { echo -e "${RED}起始必须小于结束${PLAIN}"; return; }
 
+    # 自动为 IPv6 落地地址添加方括号
+    local formatted_rip="$rip"
+    if [[ "$rip" =~ ":" ]]; then
+        formatted_rip="[${rip}]"
+    fi
+
     echo "生成中..."
     local rp=$rbp
     for ((p=$sp; p<=$ep; p++)); do
-        if ! grep -q "listen = \"0.0.0.0:$p\"" "$CONFIG_FILE"; then
+        if ! grep -q "listen = \"\[::\]:$p\"" "$CONFIG_FILE" && ! grep -q "listen = \"0.0.0.0:$p\"" "$CONFIG_FILE"; then
             cat <<EOF >> "$CONFIG_FILE"
 
 [[endpoints]]
-listen = "0.0.0.0:$p"
-remote = "$rip:$rp"
+listen = "${listen_ip}:$p"
+remote = "${formatted_rip}:$rp"
 EOF
         fi
         ((rp++))
