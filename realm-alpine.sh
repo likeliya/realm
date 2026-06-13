@@ -1,10 +1,11 @@
 #!/bin/bash
 
 # ==========================================
-# Realm 一键转发脚本 (防死循环版 v3.1.2 - Alpine 兼容版)
-# 修复/新增日志:
-# 1. 增加对 Alpine Linux 的完整支持 (apk 包管理 + OpenRC 守护)
-# 2. 自动识别 musl 环境并拉取对应的二进制文件
+# Realm 一键转发脚本 (防死循环版 v3.1.2) - 增加 Alpine/OpenRC 支持
+# 更新日志:
+# 1. 新增输入错误计数器
+# 2. 连续输错 2 次自动返回主菜单
+# 3. 增加对 Alpine Linux (OpenRC) 的原生支持
 # ==========================================
 
 # --- 基础配置 ---
@@ -22,73 +23,68 @@ REALM_DIR="/root/realm"
 REALM_BIN="${REALM_DIR}/realm"
 CONFIG_DIR="/root/.realm"
 CONFIG_FILE="${CONFIG_DIR}/config.toml"
-SERVICE_FILE="/etc/systemd/system/realm.service"
-OPENRC_FILE="/etc/init.d/realm"
+SERVICE_FILE_SYSTEMD="/etc/systemd/system/realm.service"
+SERVICE_FILE_OPENRC="/etc/init.d/realm"
 PANEL_DIR="${REALM_DIR}/web"
 PANEL_BIN="${PANEL_DIR}/realm_web"
-PANEL_SERVICE_FILE="/etc/systemd/system/realm-panel.service"
-PANEL_OPENRC_FILE="/etc/init.d/realm-panel"
 
-# OS 环境检测
-is_alpine=false
-if [ -f /etc/os-release ] && grep -qi "alpine" /etc/os-release; then
-    is_alpine=true
-fi
-
-# --- 跨平台服务管理函数 ---
-service_start() {
-    if $is_alpine; then rc-service "$1" start >/dev/null 2>&1; else systemctl start "$1" >/dev/null 2>&1; fi
-}
-
-service_stop() {
-    if $is_alpine; then rc-service "$1" stop >/dev/null 2>&1; else systemctl stop "$1" >/dev/null 2>&1; fi
-}
-
-service_restart() {
-    if $is_alpine; then 
-        rc-service "$1" restart >/dev/null 2>&1
-    else 
-        systemctl daemon-reload
-        systemctl restart "$1" >/dev/null 2>&1
-    fi
-}
-
-service_enable() {
-    if $is_alpine; then rc-update add "$1" default >/dev/null 2>&1; else systemctl enable "$1" >/dev/null 2>&1; fi
-}
-
-service_disable() {
-    if $is_alpine; then rc-update del "$1" default >/dev/null 2>&1; else systemctl disable "$1" >/dev/null 2>&1; fi
-}
-
-service_is_active() {
-    if $is_alpine; then
-        rc-service "$1" status 2>/dev/null | grep -q "started"
+# --- 系统初始化系统检测 ---
+check_init_sys() {
+    # 1. 最高优先级：直接检测是否为 Alpine Linux
+    if [ -f "/etc/alpine-release" ]; then
+        INIT_SYS="openrc"
+    # 2. 严谨检测 systemd：判断 systemd 目录是否作为 init 真正挂载运行
+    elif [ -d "/run/systemd/system" ]; then
+        INIT_SYS="systemd"
+    # 3. 降级备用检测：常规命令判断
+    elif command -v rc-service >/dev/null 2>&1; then
+        INIT_SYS="openrc"
+    elif command -v systemctl >/dev/null 2>&1; then
+        INIT_SYS="systemd"
     else
-        systemctl is-active --quiet "$1"
+        echo -e "${RED}无法识别当前系统的 init 管理器 (不支持 systemd 和 openrc)。${PLAIN}"
+        exit 1
     fi
 }
 
 # --- 状态检测函数 ---
+
 get_status() {
-    if service_is_active realm; then
-        echo -e "${GREEN}运行中${PLAIN}"
-    else
-        echo -e "${RED}未运行${PLAIN}"
+    if [ "$INIT_SYS" == "systemd" ]; then
+        if systemctl is-active --quiet realm; then
+            echo -e "${GREEN}运行中${PLAIN}"
+        else
+            echo -e "${RED}未运行${PLAIN}"
+        fi
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        if rc-service realm status 2>/dev/null | grep -q "started"; then
+            echo -e "${GREEN}运行中${PLAIN}"
+        else
+            echo -e "${RED}未运行${PLAIN}"
+        fi
     fi
 }
 
 get_panel_status() {
     if [ ! -f "$PANEL_BIN" ]; then
         echo -e "${RED}未安装${PLAIN}"
-    elif service_is_active realm-panel; then
-        echo -e "${GREEN}运行中${PLAIN}"
-    else
-        echo -e "${YELLOW}已安装但未启动${PLAIN}"
+    elif [ "$INIT_SYS" == "systemd" ]; then
+        if systemctl is-active --quiet realm-panel; then
+            echo -e "${GREEN}运行中${PLAIN}"
+        else
+            echo -e "${YELLOW}已安装但未启动${PLAIN}"
+        fi
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        if rc-service realm-panel status 2>/dev/null | grep -q "started"; then
+            echo -e "${GREEN}运行中${PLAIN}"
+        else
+            echo -e "${YELLOW}已安装但未启动${PLAIN}"
+        fi
     fi
 }
 
 # --- 核心校验函数 ---
+
 validate_port() {
     local port=$1
     if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
@@ -136,54 +132,11 @@ check_rule_exists() {
 }
 
 # --- 基础功能 ---
+
 init_env() {
     mkdir -p "$REALM_DIR"
     mkdir -p "$CONFIG_DIR"
     [ ! -f "$CONFIG_FILE" ] && write_config_header
-
-    # 注入伪装的 systemctl 以兼容面板后端 API
-    if $is_alpine; then
-        cat << 'EOF' > /usr/bin/systemctl
-#!/bin/sh
-ACTION=$1
-shift
-SERVICE=""
-QUIET=0
-
-# 处理参数，提取服务名和 --quiet 标志
-for arg in "$@"; do
-    if [ "$arg" = "--quiet" ]; then
-        QUIET=1
-    else
-        SERVICE=$arg
-    fi
-done
-
-case "$ACTION" in
-    is-active)
-        # 将 systemctl is-active 转换为 OpenRC 的状态检查
-        if rc-service "$SERVICE" status 2>/dev/null | grep -q "started"; then
-            [ $QUIET -eq 0 ] && echo "active"
-            exit 0
-        else
-            [ $QUIET -eq 0 ] && echo "inactive"
-            exit 3
-        fi
-        ;;
-    start|stop|restart)
-        rc-service "$SERVICE" "$ACTION" >/dev/null 2>&1
-        exit 0
-        ;;
-    daemon-reload)
-        exit 0
-        ;;
-    *)
-        exit 0
-        ;;
-esac
-EOF
-        chmod +x /usr/bin/systemctl
-    fi
 }
 
 write_config_header() {
@@ -196,27 +149,19 @@ EOF
 }
 
 check_dependencies() {
-    local dependencies=("wget" "tar" "sed" "grep" "curl" "unzip")
+    local dependencies=("wget" "tar" "sed" "grep" "curl" "unzip" "ss")
     local missing=()
-    
-    if $is_alpine; then
-        dependencies+=("iproute2" "bash" "libc6-compat") # libc6-compat 增强对非 musl 程序的兼容
-    else
-        dependencies+=("systemctl" "ss")
-    fi
-
     for dep in "${dependencies[@]}"; do
         if ! command -v "$dep" &> /dev/null; then missing+=("$dep"); fi
     done
-
-    if [ ${#missing[@]} -gt 0 ]; then
+    if [ ${#missing[@]} -gt 0 ] || ! command -v ip >/dev/null 2>&1; then
         echo -e "${YELLOW}安装依赖: ${missing[*]} ...${PLAIN}"
-        if $is_alpine; then
-            apk update >/dev/null 2>&1 && apk add "${missing[@]}"
-        elif [ -x "$(command -v apt-get)" ]; then
+        if [ -x "$(command -v apt-get)" ]; then
             apt-get update -y >/dev/null 2>&1 && apt-get install -y "${missing[@]}" iproute2
         elif [ -x "$(command -v yum)" ]; then
             yum install -y "${missing[@]}" iproute
+        elif [ -x "$(command -v apk)" ]; then
+            apk update >/dev/null 2>&1 && apk add "${missing[@]}" iproute2
         else
             echo -e "${RED}请手动安装依赖。${PLAIN}"; exit 1
         fi
@@ -230,13 +175,10 @@ install_realm() {
     [ -z "$version" ] && version="v2.6.0"
     
     local arch=$(uname -m)
-    local libc="gnu"
-    $is_alpine && libc="musl"
     local filename=""
-    
     case "$arch" in
-        x86_64) filename="realm-x86_64-unknown-linux-${libc}.tar.gz" ;;
-        aarch64|arm64) filename="realm-aarch64-unknown-linux-${libc}.tar.gz" ;;
+        x86_64) filename="realm-x86_64-unknown-linux-gnu.tar.gz" ;;
+        aarch64) filename="realm-aarch64-unknown-linux-gnu.tar.gz" ;;
         *) echo -e "${RED}不支持架构: $arch${PLAIN}"; return 1 ;;
     esac
 
@@ -244,24 +186,8 @@ install_realm() {
     tar -xvf realm.tar.gz -C "$REALM_DIR" && rm -f realm.tar.gz
     chmod +x "$REALM_BIN"
 
-    if $is_alpine; then
-        cat <<EOF > "$OPENRC_FILE"
-#!/sbin/openrc-run
-
-name="realm"
-description="Realm Forwarding Service"
-command="${REALM_BIN}"
-command_args="-c ${CONFIG_FILE}"
-command_background=true
-pidfile="/run/realm.pid"
-
-depend() {
-    need net
-}
-EOF
-        chmod +x "$OPENRC_FILE"
-    else
-        cat <<EOF > "$SERVICE_FILE"
+    if [ "$INIT_SYS" == "systemd" ]; then
+        cat <<EOF > "$SERVICE_FILE_SYSTEMD"
 [Unit]
 Description=Realm Forwarding Service
 After=network-online.target
@@ -278,10 +204,27 @@ ExecStart=${REALM_BIN} -c ${CONFIG_FILE}
 [Install]
 WantedBy=multi-user.target
 EOF
-    fi
+        systemctl daemon-reload; systemctl enable realm; systemctl restart realm
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        cat <<EOF > "$SERVICE_FILE_OPENRC"
+#!/sbin/openrc-run
 
-    service_enable realm
-    service_restart realm
+name="realm"
+description="Realm Forwarding Service"
+command="${REALM_BIN}"
+command_args="-c ${CONFIG_FILE}"
+command_background=true
+pidfile="/var/run/realm.pid"
+directory="${REALM_DIR}"
+
+depend() {
+    need net
+}
+EOF
+        chmod +x "$SERVICE_FILE_OPENRC"
+        rc-update add realm default
+        rc-service realm restart
+    fi
     echo -e "${GREEN}安装完成${PLAIN}"
 }
 
@@ -289,14 +232,13 @@ uninstall_realm() {
     read -p "确定卸载 Realm? [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
     
-    service_stop realm
-    service_disable realm
-    
-    if $is_alpine; then
-        rm -f "$OPENRC_FILE"
-    else
-        rm -f "$SERVICE_FILE"
-        systemctl daemon-reload
+    if [ "$INIT_SYS" == "systemd" ]; then
+        systemctl stop realm; systemctl disable realm
+        rm -f "$SERVICE_FILE_SYSTEMD"; systemctl daemon-reload
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        rc-service realm stop
+        rc-update del realm default
+        rm -f "$SERVICE_FILE_OPENRC"
     fi
     
     rm -rf "$REALM_DIR"
@@ -305,13 +247,16 @@ uninstall_realm() {
     echo -e "${GREEN}已卸载${PLAIN}"
 }
 
-# --- 转发管理 ---
+# --- 转发管理 (已添加重试限制) ---
+
 add_forward() {
     echo -e "${YELLOW}>>> 添加转发 (连续错误2次自动返回)${PLAIN}"
     
+    # 1. 本机端口
     local attempt=0
     while true; do
         read -e -p "本机端口: " lp
+        # 依次校验：格式、占用、重复
         if ! validate_port "$lp"; then
             ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
             continue
@@ -327,6 +272,7 @@ add_forward() {
         break
     done
 
+    # 2. 落地IP
     attempt=0
     while true; do
         read -e -p "落地IP/域名: " rip
@@ -337,6 +283,7 @@ add_forward() {
         break
     done
 
+    # 3. 落地端口
     attempt=0
     while true; do
         read -e -p "落地端口: " rp
@@ -353,7 +300,7 @@ add_forward() {
 listen = "0.0.0.0:$lp"
 remote = "$rip:$rp"
 EOF
-    restart_script_service
+    restart_service
 }
 
 add_range_forward() {
@@ -380,7 +327,7 @@ EOF
         fi
         ((rp++))
     done
-    restart_script_service
+    restart_service
 }
 
 delete_forward() {
@@ -409,18 +356,35 @@ remote = "${remotes[i]}"
 EOF
         fi
     done
-    restart_script_service
+    restart_service
 }
 
 # --- 服务控制 ---
-start_script_service() { service_start realm; echo "已启动"; }
-stop_script_service() { service_stop realm; echo "已停止"; }
-restart_script_service() { 
-    service_restart realm; sleep 1
-    if service_is_active realm; then
-        echo -e "${GREEN}重启成功${PLAIN}"
-    else
-        echo -e "${RED}重启失败${PLAIN}"
+start_service() { 
+    if [ "$INIT_SYS" == "systemd" ]; then
+        systemctl start realm
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        rc-service realm start
+    fi
+    echo "已启动" 
+}
+
+stop_service() { 
+    if [ "$INIT_SYS" == "systemd" ]; then
+        systemctl stop realm
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        rc-service realm stop
+    fi
+    echo "已停止" 
+}
+
+restart_service() { 
+    if [ "$INIT_SYS" == "systemd" ]; then
+        systemctl daemon-reload; systemctl restart realm; sleep 1
+        systemctl is-active --quiet realm && echo -e "${GREEN}重启成功${PLAIN}" || echo -e "${RED}重启失败${PLAIN}"
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        rc-service realm restart; sleep 1
+        rc-service realm status 2>/dev/null | grep -q "started" && echo -e "${GREEN}重启成功${PLAIN}" || echo -e "${RED}重启失败${PLAIN}"
     fi
 }
 
@@ -439,8 +403,14 @@ panel_management() {
         read -p "选择: " pc
         case $pc in
             1) install_panel ;;
-            2) service_start realm-panel; echo "尝试启动..." ;;
-            3) service_stop realm-panel; echo "已停止" ;;
+            2) 
+               if [ "$INIT_SYS" == "systemd" ]; then systemctl start realm-panel; else rc-service realm-panel start; fi
+               echo "尝试启动..." 
+               ;;
+            3) 
+               if [ "$INIT_SYS" == "systemd" ]; then systemctl stop realm-panel; else rc-service realm-panel stop; fi
+               echo "已停止" 
+               ;;
             4) uninstall_panel ;;
             0) break ;;
             *) echo "无效选择" ;;
@@ -464,24 +434,8 @@ install_panel() {
     if wget -O "$p_file" "$url"; then
         unzip -o "$p_file" -d "$PANEL_DIR" && chmod +x "$PANEL_BIN" && rm -f "$p_file"
         
-        if $is_alpine; then
-            cat <<EOF > "$PANEL_OPENRC_FILE"
-#!/sbin/openrc-run
-
-name="realm-panel"
-description="Realm Web Panel"
-command="${PANEL_BIN}"
-command_background=true
-pidfile="/run/realm-panel.pid"
-directory="${PANEL_DIR}"
-
-depend() {
-    need net
-}
-EOF
-            chmod +x "$PANEL_OPENRC_FILE"
-        else
-            cat <<EOF > "$PANEL_SERVICE_FILE"
+        if [ "$INIT_SYS" == "systemd" ]; then
+            cat <<EOF > /etc/systemd/system/realm-panel.service
 [Unit]
 Description=Realm Web Panel
 After=network.target
@@ -496,10 +450,26 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+            systemctl daemon-reload; systemctl enable realm-panel; systemctl start realm-panel
+        elif [ "$INIT_SYS" == "openrc" ]; then
+            cat <<EOF > /etc/init.d/realm-panel
+#!/sbin/openrc-run
+
+name="realm-panel"
+description="Realm Web Panel"
+command="${PANEL_BIN}"
+command_background=true
+pidfile="/var/run/realm-panel.pid"
+directory="${PANEL_DIR}"
+
+depend() {
+    need net
+}
+EOF
+            chmod +x /etc/init.d/realm-panel
+            rc-update add realm-panel default
+            rc-service realm-panel start
         fi
-        
-        service_enable realm-panel
-        service_start realm-panel
         echo -e "${GREEN}面板安装成功!${PLAIN}"
     else
         echo -e "${RED}下载失败${PLAIN}"
@@ -507,13 +477,13 @@ EOF
 }
 
 uninstall_panel() {
-    service_stop realm-panel
-    service_disable realm-panel
-    if $is_alpine; then
-        rm -f "$PANEL_OPENRC_FILE"
-    else
-        rm -f "$PANEL_SERVICE_FILE"
-        systemctl daemon-reload
+    if [ "$INIT_SYS" == "systemd" ]; then
+        systemctl stop realm-panel; systemctl disable realm-panel
+        rm -f /etc/systemd/system/realm-panel.service; systemctl daemon-reload
+    elif [ "$INIT_SYS" == "openrc" ]; then
+        rc-service realm-panel stop
+        rc-update del realm-panel default
+        rm -f /etc/init.d/realm-panel
     fi
     rm -rf "$PANEL_DIR"
     echo "已卸载"
@@ -521,7 +491,6 @@ uninstall_panel() {
 
 # --- 脚本更新 ---
 Update_Shell() {
-    echo -e "${YELLOW}注意: 如果原作者(wcwq98)未将 Alpine 补丁合并到仓库，更新操作会导致丢失 Alpine 兼容能力。${PLAIN}"
     local url="https://raw.githubusercontent.com/wcwq98/realm/main/realm.sh"
     local new_ver=$(wget -qO- "$url" | grep 'sh_ver="' | awk -F "=" '{print $NF}' | tr -d '"' | head -1)
     [[ -z "$new_ver" ]] && { echo -e "${RED}检测失败${PLAIN}"; return; }
@@ -534,10 +503,11 @@ Update_Shell() {
 show_menu() {
     clear
     echo "################################################"
-    echo "#   Realm 一键转发脚本 (v${sh_ver} - Alpine版)   #"
+    echo "#        Realm 一键转发脚本 (v${sh_ver})         #"
     echo "################################################"
     echo -e " Realm 状态: $(get_status)"
     echo -e " 面板 状态: $(get_panel_status)"
+    echo -e " 当前管理器: ${GREEN}${INIT_SYS}${PLAIN}"
     echo "------------------------------------------------"
     echo "  1. 安装 / 重置 Realm"
     echo "  2. 卸载 Realm"
@@ -551,13 +521,14 @@ show_menu() {
     echo "  8. 停止服务"
     echo "  9. 重启服务"
     echo "------------------------------------------------"
-    echo "  10. 更新脚本 (可能有兼容风险)"
+    echo "  10. 更新脚本"
     echo "  11. 面板管理"
     echo "  0. 退出脚本"
     echo "################################################"
 }
 
 main() {
+    check_init_sys
     check_dependencies; init_env
     while true; do
         show_menu
@@ -569,9 +540,9 @@ main() {
             4) add_range_forward ;;
             5) delete_forward ;;
             6) cat "$CONFIG_FILE" ;;
-            7) start_script_service ;;
-            8) stop_script_service ;;
-            9) restart_script_service ;;
+            7) start_service ;;
+            8) stop_service ;;
+            9) restart_service ;;
             10) Update_Shell ;;
             11) panel_management ;;
             0) exit 0 ;;
