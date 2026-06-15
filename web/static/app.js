@@ -18,12 +18,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const pageSizeSelect = document.getElementById('pageSizeSelect');
 
+    // === 核心新增：动态注入入口 IP 选择框 ===
+    if (localPortInput && !document.getElementById('listenType')) {
+        const select = document.createElement('select');
+        select.id = 'listenType';
+        select.innerHTML = '<option value="0.0.0.0">入口: IPv4</option><option value="[::]">入口: IPv6/双栈</option>';
+        select.style.marginRight = '10px';
+        select.style.padding = '5px';
+        select.style.borderRadius = '4px';
+        // 插入到本地端口输入框的前面
+        localPortInput.parentNode.insertBefore(select, localPortInput);
+    }
+
     async function updateServiceStatus() {
         try {
             const response = await fetch('/check_status');
-            if (!response.ok) {
-                throw new Error('检查状态失败：' + response.statusText);
-            }
+            if (!response.ok) throw new Error('检查状态失败：' + response.statusText);
             const data = await response.json();
             const statusElement = document.getElementById('serviceStatus');
             
@@ -44,22 +54,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function fetchForwardingRules() {
         try {
-            const response = await fetch(`/get_rules?page=${currentPage}&size=${pageSize}`, {
+            const response = await fetch(`/get_rules?page=${currentPage}&size=${pageSize}&t=${new Date().getTime()}`, {
                 method: 'GET',
-                headers: {
-                    'Cache-Control': 'no-cache',
-                    'Pragma': 'no-cache'
-                },
+                headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
             });
     
-            if (!response.ok) {
-                throw new Error('获取规则失败：' + response.statusText);
-            }
+            if (!response.ok) throw new Error('获取规则失败：' + response.statusText);
     
             const data = await response.json();
-            if (!Array.isArray(data.rules)) {
-                throw new Error('服务器返回的数据格式不正确');
-            }
+            if (!Array.isArray(data.rules)) throw new Error('服务器返回的数据格式不正确');
 
             totalRules = data.total;
             allRules = data.rules.map(rule => {
@@ -85,16 +88,21 @@ document.addEventListener('DOMContentLoaded', () => {
             const listen = rule.listen;
             const remote = rule.remote;
 
-            // 修复：兼容 IPv6 [::]:port 格式的端口提取
+            // 提取正确的本地端口与远程信息
             const localPort = listen.substring(listen.lastIndexOf(':') + 1);
             const lastColonIndex = remote.lastIndexOf(':');
             const remoteIP = remote.substring(0, lastColonIndex);
             const remotePort = remote.substring(lastColonIndex + 1);
 
+            // 给入口类型打上醒目的标签
+            const badge = listen.includes('[::]') 
+                ? '<span style="color:#00d2ff; font-weight:bold; margin-right:6px;">[IPv6]</span>' 
+                : '<span style="color:#00ff88; font-weight:bold; margin-right:6px;">[IPv4]</span>';
+
             const row = document.createElement('tr');
             row.innerHTML = `
                 <td>${index + 1}</td>
-                <td>${localPort}</td>
+                <td>${badge}${localPort}</td>
                 <td>${remoteIP}</td>
                 <td>${remotePort}</td>
                 <td><button class="delete-btn" data-listen="${listen}">删除</button></td>
@@ -115,51 +123,30 @@ document.addEventListener('DOMContentLoaded', () => {
         const pageInfo = document.getElementById('pageInfo');
         const totalPages = Math.ceil(totalRules / pageSize);
         pageInfo.textContent = `第 ${currentPage} / ${totalPages === 0 ? 1 : totalPages} 页`;
-
         document.getElementById('prevPage').disabled = (currentPage <= 1);
         document.getElementById('nextPage').disabled = (currentPage >= totalPages || totalPages === 0);
     }
 
-    function goToPrevPage() {
-        if (currentPage > 1) {
-            currentPage--;
-            fetchForwardingRules();
-        }
-    }
-
+    function goToPrevPage() { if (currentPage > 1) { currentPage--; fetchForwardingRules(); } }
     function goToNextPage() {
         const totalPages = Math.ceil(totalRules / pageSize);
-        if (currentPage < totalPages) {
-            currentPage++;
-            fetchForwardingRules();
-        }
+        if (currentPage < totalPages) { currentPage++; fetchForwardingRules(); }
     }
 
     async function deleteRule(listenAddress) {
         try {
-            const response = await fetch(`/delete_rule?listen=${encodeURIComponent(listenAddress)}`, {
-                method: 'DELETE'
-            });
-
-            if (!response.ok) {
-                throw new Error('删除规则失败：' + response.statusText);
-            }
-
-            const restartResponse = await fetch('/restart_service', { method: 'POST' });
-            if (!restartResponse.ok) {
-                throw new Error('重启服务失败：' + restartResponse.statusText);
-            }
-
+            const response = await fetch(`/delete_rule?listen=${encodeURIComponent(listenAddress)}`, { method: 'DELETE' });
+            if (!response.ok) throw new Error('删除规则失败：' + response.statusText);
+            
+            await fetch('/restart_service', { method: 'POST' });
             outputDiv.textContent = '规则已删除，服务已重启';
             await fetchForwardingRules();
             await updateServiceStatus();
-        } catch (error) {
-            console.error('删除失败:', error);
-            outputDiv.textContent = error.message;
-        }
+        } catch (error) { outputDiv.textContent = error.message; }
     }
 
     async function addRule() {
+        const listenType = document.getElementById('listenType') ? document.getElementById('listenType').value : '0.0.0.0';
         const localPort = localPortInput.value.trim();
         const remoteIP = remoteIPInput.value.trim();
         const remotePort = remotePortInput.value.trim();
@@ -170,14 +157,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         try {
-            // 修复：兼容 IPv6 的已用端口提取检测
             const usedPorts = new Set(allRules.map(r => r.listen.substring(r.listen.lastIndexOf(':') + 1)));
             if (usedPorts.has(localPort)) {
                 outputDiv.textContent = `端口 ${localPort} 已被占用`;
                 return;
             }
 
-            // 修复：自动为 IPv6 格式添加括号 []
+            // 自动为 IPv6 添加方括号
             let safeRemoteIP = remoteIP;
             if (safeRemoteIP.includes(':') && !safeRemoteIP.startsWith('[')) {
                 safeRemoteIP = `[${safeRemoteIP}]`;
@@ -185,34 +171,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const response = await fetch('/add_rule', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    listen: `0.0.0.0:${localPort}`,
+                    listen: `${listenType}:${localPort}`,
                     remote: `${safeRemoteIP}:${remotePort}`
                 })
             });
 
-            if (!response.ok) {
-                throw new Error('添加规则失败：' + response.statusText);
-            }
-
-            const restartResponse = await fetch('/restart_service', { method: 'POST' });
-            if (!restartResponse.ok) {
-                throw new Error('重启服务失败：' + restartResponse.statusText);
-            }
-
+            if (!response.ok) throw new Error('添加规则失败：' + response.statusText);
+            
+            await fetch('/restart_service', { method: 'POST' });
             outputDiv.textContent = '规则添加成功，服务已重启';
-            localPortInput.value = '';
-            remoteIPInput.value = '';
-            remotePortInput.value = '';
+            localPortInput.value = ''; remoteIPInput.value = ''; remotePortInput.value = '';
             await fetchForwardingRules();
             await updateServiceStatus();
-        } catch (error) {
-            console.error('添加失败:', error);
-            outputDiv.textContent = error.message;
-        }
+        } catch (error) { outputDiv.textContent = error.message; }
     }
 
     async function addBatchRules() {
@@ -222,34 +195,41 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // 修复：兼容 IPv6 的已用端口提取检测
+        const listenType = document.getElementById('listenType') ? document.getElementById('listenType').value : '0.0.0.0';
         const usedPorts = new Set(allRules.map(r => r.listen.substring(r.listen.lastIndexOf(':') + 1)));
         const failedRules = [];
         let hasSuccess = false;
 
         for (const rule of rules) {
-            const match = rule.match(/^(\d+):(\[.*?\]:\d+|\S+)$/);
-            if (!match) {
+            const firstColon = rule.indexOf(':');
+            if (firstColon === -1) {
                 failedRules.push(`格式错误: ${rule}`);
                 continue;
             }
 
-            const localPort = match[1];
-            const remoteAddress = match[2];
+            const localPort = rule.substring(0, firstColon);
+            let remoteAddress = rule.substring(firstColon + 1);
 
             if (usedPorts.has(localPort)) {
                 failedRules.push(`端口 ${localPort} 已被占用`);
                 continue;
             }
 
+            // 终极修复：批量添加也能智能识别 IPv6 并套上方括号
+            const colonsCount = (remoteAddress.match(/:/g) || []).length;
+            if (colonsCount >= 2 && !remoteAddress.startsWith('[')) {
+                const lastColon = remoteAddress.lastIndexOf(':');
+                const ip = remoteAddress.substring(0, lastColon);
+                const port = remoteAddress.substring(lastColon + 1);
+                remoteAddress = `[${ip}]:${port}`;
+            }
+
             try {
                 const response = await fetch('/add_rule', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        listen: `0.0.0.0:${localPort}`,
+                        listen: `${listenType}:${localPort}`,
                         remote: remoteAddress
                     })
                 });
@@ -258,23 +238,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     failedRules.push(`添加失败: ${rule}`);
                     continue;
                 }
-
                 usedPorts.add(localPort);
                 hasSuccess = true;
-            } catch (error) {
-                failedRules.push(`添加失败: ${rule} - ${error.message}`);
-            }
+            } catch (error) { failedRules.push(`添加失败: ${rule} - ${error.message}`); }
         }
 
         if (hasSuccess) {
-            try {
-                const restartResponse = await fetch('/restart_service', { method: 'POST' });
-                if (!restartResponse.ok) {
-                    throw new Error('重启服务失败');
-                }
-            } catch (error) {
-                failedRules.push('服务重启失败');
-            }
+            try { await fetch('/restart_service', { method: 'POST' }); } 
+            catch (error) { failedRules.push('服务重启失败'); }
         }
 
         rulesInput.value = '';
@@ -289,69 +260,32 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     startButton.addEventListener('click', async () => {
-        try {
-            const response = await fetch('/start_service', { method: 'POST' });
-            if (!response.ok) throw new Error('启动服务失败：' + response.statusText);
-            outputDiv.textContent = '服务启动成功';
-            await updateServiceStatus();
-        } catch (error) {
-            console.error('启动失败:', error);
-            outputDiv.textContent = error.message;
-        }
+        try { await fetch('/start_service', { method: 'POST' }); outputDiv.textContent = '服务启动成功'; await updateServiceStatus(); } catch (error) { outputDiv.textContent = error.message; }
     });
-
     stopButton.addEventListener('click', async () => {
-        try {
-            const response = await fetch('/stop_service', { method: 'POST' });
-            if (!response.ok) throw new Error('停止服务失败：' + response.statusText);
-            outputDiv.textContent = '服务停止成功';
-            await updateServiceStatus();
-        } catch (error) {
-            console.error('停止失败:', error);
-            outputDiv.textContent = error.message;
-        }
+        try { await fetch('/stop_service', { method: 'POST' }); outputDiv.textContent = '服务停止成功'; await updateServiceStatus(); } catch (error) { outputDiv.textContent = error.message; }
     });
-
     restartButton.addEventListener('click', async () => {
-        try {
-            const response = await fetch('/restart_service', { method: 'POST' });
-            if (!response.ok) throw new Error('重启服务失败：' + response.statusText);
-            outputDiv.textContent = '服务重启成功';
-            await updateServiceStatus();
-        } catch (error) {
-            console.error('重启失败:', error);
-            outputDiv.textContent = error.message;
-        }
+        try { await fetch('/restart_service', { method: 'POST' }); outputDiv.textContent = '服务重启成功'; await updateServiceStatus(); } catch (error) { outputDiv.textContent = error.message; }
     });
-
     logoutButton.addEventListener('click', async () => {
         try {
             const response = await fetch('/logout', { method: 'POST' });
-            if (response.ok) {
-                window.location.href = '/login';
-            } else {
-                throw new Error('登出失败：' + response.statusText);
-            }
-        } catch (error) {
-            console.error('登出失败:', error);
-            outputDiv.textContent = error.message;
-        }
+            if (response.ok) window.location.href = '/login'; else throw new Error('登出失败');
+        } catch (error) { outputDiv.textContent = error.message; }
     });
 
     addRuleButton.addEventListener('click', addRule);
     addBatchRulesButton.addEventListener('click', addBatchRules);
-
     document.getElementById('prevPage').addEventListener('click', goToPrevPage);
     document.getElementById('nextPage').addEventListener('click', goToNextPage);
 
     pageSizeSelect.addEventListener('change', () => {
         pageSize = parseInt(pageSizeSelect.value, 10);
-        currentPage = 1;
-        fetchForwardingRules();
+        currentPage = 1; fetchForwardingRules();
     });
 
     fetchForwardingRules();
     updateServiceStatus();
-    
     setInterval(updateServiceStatus, 15000);
 });
