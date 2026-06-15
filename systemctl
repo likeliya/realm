@@ -1,0 +1,61 @@
+#!/bin/sh
+
+ACTION=""
+SERVICE=""
+QUIET=false
+
+# 健壮的参数解析器：循环遍历所有传入参数
+for arg in "$@"; do
+    case "$arg" in
+        --quiet|-q)
+            QUIET=true
+            ;;
+        -*)
+            # 忽略其他不需要的系统级选项
+            ;;
+        *)
+            if [ -z "$ACTION" ]; then
+                ACTION="$arg"
+            else
+                SERVICE="$arg"
+            fi
+            ;;
+    esac
+done
+
+# 自动去掉可能存在的 .service 后缀
+SERVICE=$(echo "$SERVICE" | sed 's/\.service//g')
+
+case "$ACTION" in
+    start|stop|restart)
+        rc-service "$SERVICE" "$ACTION" >/dev/null 2>&1
+        ;;
+    is-active)
+        if rc-service "$SERVICE" status 2>/dev/null | grep -q "started"; then
+            [ "$QUIET" = false ] && echo "active"
+            exit 0
+        else
+            [ "$QUIET" = false ] && echo "inactive"
+            exit 3
+        fi
+        ;;
+    status)
+        if rc-service "$SERVICE" status 2>/dev/null | grep -q "started"; then
+            echo "Active: active (running)"
+            exit 0
+        else
+            echo "Active: inactive (dead)"
+            exit 3
+        fi
+        ;;
+    enable|disable)
+        if [ "$ACTION" = "enable" ]; then
+            rc-update add "$SERVICE" default >/dev/null 2>&1
+        else
+            rc-update del "$SERVICE" default >/dev/null 2>&1
+        fi
+        ;;
+    *)
+        exit 0
+        ;;
+esac
