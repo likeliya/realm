@@ -1,17 +1,18 @@
 #!/bin/bash
 
 # ==========================================
-# Realm 一键转发脚本 v3.1.2
+# Realm 一键转发脚本 v3.1.3
 # 更新日志:
 # 1. 新增输入错误计数器
 # 2. 连续输错 2 次自动返回主菜单
 # 3. 添加 ipv4 和 ipv6 入口选择
 # 4. 增加对 Alpine Linux (OpenRC) 的原生支持
+# 5. 针对 Alpine 自动配置伪装 systemctl 修复面板状态抓取
 # ==========================================
 
 # --- 基础配置 ---
-sh_ver="3.1.2"
-panel_ver="v3.1.2.1"
+sh_ver="3.1.3"
+panel_ver="v3.1.3.1"
 
 # 颜色定义
 RED="\033[31m"
@@ -28,6 +29,9 @@ SERVICE_FILE_SYSTEMD="/etc/systemd/system/realm.service"
 SERVICE_FILE_OPENRC="/etc/init.d/realm"
 PANEL_DIR="${REALM_DIR}/web"
 PANEL_BIN="${PANEL_DIR}/realm_web"
+
+# === 核心修改：请将下方链接替换为你真实的 GitHub 脚本 Raw 直链 ===
+SYSTEMCTL_PROXY_URL="https://raw.githubusercontent.com/likeliya/realm/refs/heads/main/systemctl"
 
 # --- 系统初始化系统检测 ---
 check_init_sys() {
@@ -124,7 +128,7 @@ check_port_available() {
 check_rule_exists() {
     local port=$1
     if [ -f "$CONFIG_FILE" ]; then
-        # 兼容旧的 0.0.0.0 格式和新的 [::] 格式检测
+        # 兼容旧 of 0.0.0.0 格式和新的 [::] 格式检测
         if grep -q "listen = \"0.0.0.0:${port}\"" "$CONFIG_FILE" || grep -q "listen = \"\[::\]:${port}\"" "$CONFIG_FILE"; then
             echo -e "${RED}错误: 端口 ${port} 的规则已存在。${PLAIN}"
             return 0
@@ -151,26 +155,22 @@ EOF
 }
 
 check_dependencies() {
-    # 把 ss 从常规依赖数组中拿出来
     local dependencies=("wget" "tar" "sed" "grep" "curl" "unzip")
     local missing=()
     for dep in "${dependencies[@]}"; do
         if ! command -v "$dep" &> /dev/null; then missing+=("$dep"); fi
     done
     
-    # 专门单独检查 ss 和 ip 命令 (它们通常都由 iproute/iproute2 提供)
     local need_iproute=false
     if ! command -v ss >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
         need_iproute=true
     fi
 
     if [ ${#missing[@]} -gt 0 ] || [ "$need_iproute" = true ]; then
-        # 友好的打印提示
         local msg="${missing[*]}"
         [ "$need_iproute" = true ] && msg="$msg iproute2"
         echo -e "${YELLOW}安装缺失依赖: $msg ...${PLAIN}"
         
-        # 执行对应系统的安装命令
         if [ -x "$(command -v apt-get)" ]; then
             apt-get update -y >/dev/null 2>&1
             [ ${#missing[@]} -gt 0 ] && apt-get install -y "${missing[@]}"
@@ -194,7 +194,6 @@ install_realm() {
     local version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [ -z "$version" ] && version="v2.6.0"
     
-    # 核心修复：动态判断 libc 环境。如果是 Alpine 则使用 musl 版本。
     local libc="gnu"
     if [ -f "/etc/alpine-release" ]; then
         libc="musl"
@@ -232,7 +231,6 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload; systemctl enable realm; systemctl restart realm
     elif [ "$INIT_SYS" == "openrc" ]; then
-        # 修复：增加日志输出变量，进程异常退出时可查看 /var/log/realm.err 排查
         cat <<EOF > "$SERVICE_FILE_OPENRC"
 #!/sbin/openrc-run
 
@@ -286,13 +284,12 @@ stop_service() {
     echo "已停止" 
 }
 
-# --- 转发管理 (已添加重试限制) (增加入口 IP 类型选择)---
+# --- 转发管理 ---
 
 add_forward() {
     echo -e "${YELLOW}>>> 添加转发 (连续错误2次自动返回)${PLAIN}"
     
     local attempt=0
-    # 0. 选择监听IP类型
     local listen_ip="0.0.0.0"
     while true; do
         read -e -p "选择本机入口类型 (1: IPv4 [0.0.0.0], 2: IPv6/双栈 [::] 默认1): " l_type
@@ -308,7 +305,6 @@ add_forward() {
         fi
     done
 
-    # 1. 本机端口
     attempt=0
     while true; do
         read -e -p "本机端口: " lp
@@ -327,7 +323,6 @@ add_forward() {
         break
     done
 
-    # 2. 落地IP
     attempt=0
     while true; do
         read -e -p "落地IP/域名: " rip
@@ -338,7 +333,6 @@ add_forward() {
         break
     done
 
-    # 3. 落地端口
     attempt=0
     while true; do
         read -e -p "落地端口: " rp
@@ -349,7 +343,6 @@ add_forward() {
         break
     done
 
-    # 自动为 IPv6 落地地址添加方括号
     local formatted_rip="$rip"
     if [[ "$rip" =~ ":" ]]; then
         formatted_rip="[${rip}]"
@@ -368,7 +361,6 @@ add_range_forward() {
     echo -e "${YELLOW}>>> 端口段转发 (连续错误2次自动返回)${PLAIN}"
     local attempt=0
     
-    # 0. 选择监听IP类型
     local listen_ip="0.0.0.0"
     while true; do
         read -e -p "选择本机入口类型 (1: IPv4 [0.0.0.0], 2: IPv6/双栈 [::] 默认1): " l_type
@@ -391,7 +383,6 @@ add_range_forward() {
 
     [ "$sp" -ge "$ep" ] && { echo -e "${RED}起始必须小于结束${PLAIN}"; return; }
 
-    # 自动为 IPv6 落地地址添加方括号
     local formatted_rip="$rip"
     if [[ "$rip" =~ ":" ]]; then
         formatted_rip="[${rip}]"
@@ -552,6 +543,16 @@ EOF
             chmod +x /etc/init.d/realm-panel
             rc-update add realm-panel default
             rc-service realm-panel start
+
+            # === 核心增加：自动在 Alpine 系统下配置伪装的 systemctl ===
+            echo -e "${YELLOW}> 检测到 Alpine Linux，开始配置伪装 systemctl 以支撑面板状态抓取...${PLAIN}"
+            if wget -qO /bin/systemctl "$SYSTEMCTL_PROXY_URL"; then
+                chmod +x /bin/systemctl
+                ln -sf /bin/systemctl /usr/bin/systemctl
+                echo -e "${GREEN}伪装 systemctl 自动化部署并链接成功！${PLAIN}"
+            else
+                echo -e "${RED}警告: 伪装 systemctl 脚本下载失败，请检查 URL 是否有效。${PLAIN}"
+            fi
         fi
         echo -e "${GREEN}面板安装成功!${PLAIN}"
     else
@@ -567,6 +568,11 @@ uninstall_panel() {
         rc-service realm-panel stop
         rc-update del realm-panel default
         rm -f /etc/init.d/realm-panel
+
+        # === 核心增加：卸载面板时顺手清理伪装脚本与软链接 ===
+        echo -e "${YELLOW}> 正在清理 Alpine 专属伪装环境...${PLAIN}"
+        rm -f /bin/systemctl
+        rm -f /usr/bin/systemctl
     fi
     rm -rf "$PANEL_DIR"
     echo "已卸载"
