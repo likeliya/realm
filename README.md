@@ -17,13 +17,13 @@
 【kvm lxc docker podman】 Alpine
 
 ```
-curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-alpine.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
+curl -L https://github.com/likeliya/realm/releases/download/v3.1.3.1/realm-alpine.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
 ```
 
 【kvm lxc docker podman】 Debian/Ubuntu
 
 ```
-curl -L https://github.com/likeliya/realm/releases/download/v3.1.2.1/realm-debian.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
+curl -L https://github.com/likeliya/realm/releases/download/v3.1.3.1/realm-debian.sh -o realm.sh && chmod +x realm.sh && bash realm.sh
 ```
 
 ## 
