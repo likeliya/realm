@@ -30,9 +30,9 @@ curl -L https://github.com/likeliya/realm/releases/download/v3.1.3.1/realm-debia
 
 ### 添加标签页图标：
 
-![001.png](https://image.mlikeli.xyz/file/image/NH3PUsnz.png)
+![001.png](https://pic.likelive.win/file/image/NH3PUsnz.png)
 
-![002.png](https://image.mlikeli.xyz/file/image/myx0l8kM.png)
+![002.png](https://pic.likelive.win/file/image/myx0l8kM.png)
 
 
 
